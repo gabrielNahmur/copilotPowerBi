@@ -1,15 +1,47 @@
 import os
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic import BaseModel
 import openai
 from sqlalchemy import create_engine, text
-import numpy as np # Importa a biblioteca NumPy para lidar com valores numéricos
+import json
+from decimal import Decimal
+import datetime
 
 # --- Configuração Inicial ---
 app = FastAPI()
 
-# Carrega as configurações das variáveis de ambiente
+# --- Tradutor JSON Personalizado e Robusto ---
+# Esta classe ensina o FastAPI a lidar com tipos de dados especiais
+# que não são compatíveis com JSON padrão, como Decimal e datas.
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            # Converte Decimais para float, ou para None se for um valor especial (NaN, Inf)
+            if obj.is_nan() or obj.is_infinite():
+                return None
+            return float(obj)
+        if isinstance(obj, (datetime.datetime, datetime.date)):
+            # Converte objetos de data/hora para o formato string ISO
+            return obj.isoformat()
+        # Para qualquer outro tipo, usa o comportamento padrão
+        return super().default(obj)
+
+# Esta classe usa nosso tradutor personalizado para criar a resposta da API
+class CustomJSONResponse(Response):
+    media_type = "application/json"
+    def render(self, content: any) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+            cls=CustomJSONEncoder, # Usa nosso tradutor
+        ).encode("utf-8")
+
+
+# --- Carregamento de Configurações ---
 openai.api_key = os.getenv("OPENAI_API_KEY")
 db_connection_str = os.getenv("DATABASE_URL")
 
@@ -34,12 +66,14 @@ schema_definition = carregar_schema()
 class QuestionRequest(BaseModel):
     question: str
 
+
+# --- Endpoints da API ---
 @app.post("/ask")
 def ask_my_data(request: QuestionRequest):
     user_question = request.question
 
     if engine is None or "ERRO" in schema_definition:
-        return {"error": "Erro de configuração do servidor."}
+        return CustomJSONResponse(status_code=500, content={"error": "Erro de configuração do servidor."})
 
     prompt = f"""
     Sua tarefa é traduzir a pergunta de um usuário em uma consulta SQL válida para o PostgreSQL.
@@ -63,31 +97,28 @@ def ask_my_data(request: QuestionRequest):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
         )
-        
         raw_text = response.choices[0].message.content
         generated_sql = raw_text.replace("```sql", "").replace("```", "").replace("\n", " ").replace("\r", " ").strip()
-        
         print("--- SQL Final (com aspas) Enviado ao Banco ---")
         print(generated_sql)
-
     except Exception as e:
-        return {"error": f"Erro ao chamar a API da OpenAI: {e}"}
+        return CustomJSONResponse(status_code=500, content={"error": f"Erro ao chamar a API da OpenAI: {e}"})
 
     try:
         with engine.connect() as connection:
             result_df = pd.read_sql_query(sql=text(generated_sql), con=connection)
         
-        # --- LIMPEZA DE DADOS PARA GARANTIR COMPATIBILIDADE JSON ---
-        # Substitui valores infinitos (inf, -inf) por 'NaN' (Not a Number) do NumPy
-        result_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        
-        # Converte o DataFrame para um dicionário, onde NaNs se tornarão 'null' no JSON final
+        # Converte o DataFrame para um dicionário Python padrão
         data = result_df.to_dict(orient="records")
         
-        return data
+        # --- USA NOSSA RESPOSTA PERSONALIZADA ---
+        # Esta é a mudança crucial: usamos nossa classe de resposta que sabe
+        # como "traduzir" os dados corretamente para JSON.
+        return CustomJSONResponse(content=data)
         
     except Exception as e:
-        return {"error": f"Erro ao executar a consulta no banco de dados: {e}\n[SQL Gerado que falhou: {generated_sql}]"}
+        error_content = {"error": f"Erro ao executar a consulta no banco de dados: {e}", "sql_que_falhou": generated_sql}
+        return CustomJSONResponse(status_code=500, content=error_content)
 
 @app.get("/")
 def read_root():
