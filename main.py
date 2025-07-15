@@ -7,49 +7,10 @@ from sqlalchemy import create_engine, text
 import json
 from decimal import Decimal
 import datetime
-import math # Importa a biblioteca de matemática para checagem
+import math
 
 # --- Configuração Inicial ---
 app = FastAPI()
-
-# --- Tradutor JSON Definitivo e Robusto ---
-# Esta classe é a solução final. Ela lida com todos os tipos de dados
-# que podem causar problemas na conversão para JSON.
-class FinalJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        # Se o objeto for do tipo Decimal
-        if isinstance(obj, Decimal):
-            # Se for um Decimal especial (Infinito, NaN), retorna nulo
-            if obj.is_nan() or obj.is_infinite():
-                return None
-            # Senão, converte para float
-            return float(obj)
-        # Se o objeto for do tipo float
-        if isinstance(obj, float):
-            # Se for um float especial (Infinito, NaN), retorna nulo
-            if not math.isfinite(obj):
-                return None
-            # Senão, retorna o float normal
-            return obj
-        # Se for um objeto de data ou hora
-        if isinstance(obj, (datetime.datetime, datetime.date)):
-            return obj.isoformat()
-        # Para qualquer outro tipo, usa o comportamento padrão
-        return super().default(obj)
-
-# Esta classe de resposta usa nosso tradutor final
-class FinalJSONResponse(Response):
-    media_type = "application/json"
-    def render(self, content: any) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False,
-            indent=None,
-            separators=(",", ":"),
-            cls=FinalJSONEncoder, # Usa nosso tradutor final
-        ).encode("utf-8")
-
 
 # --- Carregamento de Configurações ---
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -76,6 +37,20 @@ schema_definition = carregar_schema()
 class QuestionRequest(BaseModel):
     question: str
 
+# --- Função de Limpeza Manual e Explícita ---
+def clean_value(value):
+    """
+    Verifica e limpa um único valor para garantir que ele seja compatível com JSON.
+    """
+    if isinstance(value, (Decimal, float)):
+        # Se for um número especial (Infinito, NaN), retorna nulo.
+        if not math.isfinite(value):
+            return None
+        # Senão, converte para float padrão.
+        return float(value)
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    return value
 
 # --- Endpoints da API ---
 @app.post("/ask")
@@ -83,7 +58,7 @@ def ask_my_data(request: QuestionRequest):
     user_question = request.question
 
     if engine is None or "ERRO" in schema_definition:
-        return FinalJSONResponse(status_code=500, content={"error": "Erro de configuração do servidor."})
+        return Response(content=json.dumps({"error": "Erro de configuração do servidor."}), media_type="application/json", status_code=500)
 
     prompt = f"""
     Sua tarefa é traduzir a pergunta de um usuário em uma consulta SQL válida para o PostgreSQL.
@@ -112,20 +87,30 @@ def ask_my_data(request: QuestionRequest):
         print("--- SQL Final (com aspas) Enviado ao Banco ---")
         print(generated_sql)
     except Exception as e:
-        return FinalJSONResponse(status_code=500, content={"error": f"Erro ao chamar a API da OpenAI: {e}"})
+        return Response(content=json.dumps({"error": f"Erro ao chamar a API da OpenAI: {e}"}), media_type="application/json", status_code=500)
 
     try:
         with engine.connect() as connection:
-            result_df = pd.read_sql_query(sql=text(generated_sql), con=connection)
-        
-        data = result_df.to_dict(orient="records")
-        
-        # Usa nossa resposta final e robusta
-        return FinalJSONResponse(content=data)
+            result = connection.execute(text(generated_sql))
+            
+            # --- LÓGICA DE CONVERSÃO MANUAL ---
+            # Em vez de usar pandas.to_dict, construímos a resposta manualmente.
+            
+            # Pega os nomes das colunas do resultado
+            column_names = [desc[0] for desc in result.cursor.description]
+            
+            # Cria uma lista de dicionários, limpando cada valor individualmente
+            data = [
+                {column_names[i]: clean_value(value) for i, value in enumerate(row)}
+                for row in result.fetchall()
+            ]
+
+        # Retorna os dados limpos como uma resposta JSON padrão do FastAPI
+        return data
         
     except Exception as e:
         error_content = {"error": f"Erro ao executar a consulta no banco de dados: {e}", "sql_que_falhou": generated_sql}
-        return FinalJSONResponse(status_code=500, content=error_content)
+        return Response(content=json.dumps(error_content), media_type="application/json", status_code=500)
 
 @app.get("/")
 def read_root():
