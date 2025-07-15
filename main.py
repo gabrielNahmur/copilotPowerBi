@@ -7,28 +7,38 @@ from sqlalchemy import create_engine, text
 import json
 from decimal import Decimal
 import datetime
+import math # Importa a biblioteca de matemática para checagem
 
 # --- Configuração Inicial ---
 app = FastAPI()
 
-# --- Tradutor JSON Personalizado e Robusto ---
-# Esta classe ensina o FastAPI a lidar com tipos de dados especiais
-# que não são compatíveis com JSON padrão, como Decimal e datas.
-class CustomJSONEncoder(json.JSONEncoder):
+# --- Tradutor JSON Definitivo e Robusto ---
+# Esta classe é a solução final. Ela lida com todos os tipos de dados
+# que podem causar problemas na conversão para JSON.
+class FinalJSONEncoder(json.JSONEncoder):
     def default(self, obj):
+        # Se o objeto for do tipo Decimal
         if isinstance(obj, Decimal):
-            # Converte Decimais para float, ou para None se for um valor especial (NaN, Inf)
+            # Se for um Decimal especial (Infinito, NaN), retorna nulo
             if obj.is_nan() or obj.is_infinite():
                 return None
+            # Senão, converte para float
             return float(obj)
+        # Se o objeto for do tipo float
+        if isinstance(obj, float):
+            # Se for um float especial (Infinito, NaN), retorna nulo
+            if not math.isfinite(obj):
+                return None
+            # Senão, retorna o float normal
+            return obj
+        # Se for um objeto de data ou hora
         if isinstance(obj, (datetime.datetime, datetime.date)):
-            # Converte objetos de data/hora para o formato string ISO
             return obj.isoformat()
         # Para qualquer outro tipo, usa o comportamento padrão
         return super().default(obj)
 
-# Esta classe usa nosso tradutor personalizado para criar a resposta da API
-class CustomJSONResponse(Response):
+# Esta classe de resposta usa nosso tradutor final
+class FinalJSONResponse(Response):
     media_type = "application/json"
     def render(self, content: any) -> bytes:
         return json.dumps(
@@ -37,7 +47,7 @@ class CustomJSONResponse(Response):
             allow_nan=False,
             indent=None,
             separators=(",", ":"),
-            cls=CustomJSONEncoder, # Usa nosso tradutor
+            cls=FinalJSONEncoder, # Usa nosso tradutor final
         ).encode("utf-8")
 
 
@@ -73,7 +83,7 @@ def ask_my_data(request: QuestionRequest):
     user_question = request.question
 
     if engine is None or "ERRO" in schema_definition:
-        return CustomJSONResponse(status_code=500, content={"error": "Erro de configuração do servidor."})
+        return FinalJSONResponse(status_code=500, content={"error": "Erro de configuração do servidor."})
 
     prompt = f"""
     Sua tarefa é traduzir a pergunta de um usuário em uma consulta SQL válida para o PostgreSQL.
@@ -102,23 +112,20 @@ def ask_my_data(request: QuestionRequest):
         print("--- SQL Final (com aspas) Enviado ao Banco ---")
         print(generated_sql)
     except Exception as e:
-        return CustomJSONResponse(status_code=500, content={"error": f"Erro ao chamar a API da OpenAI: {e}"})
+        return FinalJSONResponse(status_code=500, content={"error": f"Erro ao chamar a API da OpenAI: {e}"})
 
     try:
         with engine.connect() as connection:
             result_df = pd.read_sql_query(sql=text(generated_sql), con=connection)
         
-        # Converte o DataFrame para um dicionário Python padrão
         data = result_df.to_dict(orient="records")
         
-        # --- USA NOSSA RESPOSTA PERSONALIZADA ---
-        # Esta é a mudança crucial: usamos nossa classe de resposta que sabe
-        # como "traduzir" os dados corretamente para JSON.
-        return CustomJSONResponse(content=data)
+        # Usa nossa resposta final e robusta
+        return FinalJSONResponse(content=data)
         
     except Exception as e:
         error_content = {"error": f"Erro ao executar a consulta no banco de dados: {e}", "sql_que_falhou": generated_sql}
-        return CustomJSONResponse(status_code=500, content=error_content)
+        return FinalJSONResponse(status_code=500, content=error_content)
 
 @app.get("/")
 def read_root():
