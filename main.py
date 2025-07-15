@@ -1,35 +1,15 @@
 import os
 import pandas as pd
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
 from pydantic import BaseModel
 import openai
 from sqlalchemy import create_engine, text
-import json
-from decimal import Decimal
+import numpy as np # Importa a biblioteca NumPy para lidar com valores numéricos
 
-
+# --- Configuração Inicial ---
 app = FastAPI()
 
-class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, Decimal):
-            if obj.is_nan() or obj.is_infinite():
-                return None
-            return float(obj)
-        return super().default(obj)
-
-class CustomJSONResponse(Response):
-    media_type = "application/json"
-    def render(self, content: any) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            allow_nan=False, 
-            indent=None,
-            separators=(",", ":"),
-            cls=CustomJSONEncoder,
-        ).encode("utf-8")
-
+# Carrega as configurações das variáveis de ambiente
 openai.api_key = os.getenv("OPENAI_API_KEY")
 db_connection_str = os.getenv("DATABASE_URL")
 
@@ -91,19 +71,23 @@ def ask_my_data(request: QuestionRequest):
         print(generated_sql)
 
     except Exception as e:
-        return CustomJSONResponse(content={"error": f"Erro ao chamar a API da OpenAI: {e}"})
+        return {"error": f"Erro ao chamar a API da OpenAI: {e}"}
 
     try:
         with engine.connect() as connection:
             result_df = pd.read_sql_query(sql=text(generated_sql), con=connection)
         
-        # Converte o DataFrame para um dicionário Python padrão
+        # --- LIMPEZA DE DADOS PARA GARANTIR COMPATIBILIDADE JSON ---
+        # Substitui valores infinitos (inf, -inf) por 'NaN' (Not a Number) do NumPy
+        result_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        
+        # Converte o DataFrame para um dicionário, onde NaNs se tornarão 'null' no JSON final
         data = result_df.to_dict(orient="records")
         
-        return CustomJSONResponse(content=data)
+        return data
         
     except Exception as e:
-        return CustomJSONResponse(content={"error": f"Erro ao executar a consulta no banco de dados: {e}\n[SQL Gerado que falhou: {generated_sql}]"})
+        return {"error": f"Erro ao executar a consulta no banco de dados: {e}\n[SQL Gerado que falhou: {generated_sql}]"}
 
 @app.get("/")
 def read_root():
