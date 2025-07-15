@@ -9,10 +9,10 @@ from decimal import Decimal
 import datetime
 import math
 
-# --- Configuração Inicial ---
+
 app = FastAPI()
 
-# --- Carregamento de Configurações ---
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
 db_connection_str = os.getenv("DATABASE_URL")
 
@@ -37,22 +37,22 @@ schema_definition = carregar_schema()
 class QuestionRequest(BaseModel):
     question: str
 
-# --- Função de Limpeza Manual e Explícita ---
+
 def clean_value(value):
     """
     Verifica e limpa um único valor para garantir que ele seja compatível com JSON.
     """
     if isinstance(value, (Decimal, float)):
-        # Se for um número especial (Infinito, NaN), retorna nulo.
+        
         if not math.isfinite(value):
             return None
-        # Senão, converte para float padrão.
+        
         return float(value)
     if isinstance(value, (datetime.datetime, datetime.date)):
         return value.isoformat()
     return value
 
-# --- Endpoints da API ---
+
 @app.post("/ask")
 def ask_my_data(request: QuestionRequest):
     user_question = request.question
@@ -70,6 +70,7 @@ def ask_my_data(request: QuestionRequest):
     1. Para respeitar as letras maiúsculas, SEMPRE coloque os nomes das colunas e tabelas entre aspas duplas. Exemplo: SELECT "DESCRICAO_ITEM", SUM("QTD_VENDA") FROM "vendas_detalhadas".
     2. A única tabela que você deve usar é "vendas_detalhadas".
     3. Para selecionar "top 5", use 'LIMIT 5'.
+    4. Para garantir resultados limpos, SEMPRE adicione 'WHERE "DESCRICAO_ITEM" IS NOT NULL' em qualquer consulta que envolva a coluna "DESCRICAO_ITEM".
 
     Pergunta do Usuário: "{user_question}"
     
@@ -93,19 +94,18 @@ def ask_my_data(request: QuestionRequest):
         with engine.connect() as connection:
             result = connection.execute(text(generated_sql))
             
-            # --- LÓGICA DE CONVERSÃO MANUAL ---
-            # Em vez de usar pandas.to_dict, construímos a resposta manualmente.
             
-            # Pega os nomes das colunas do resultado
+            
+            
             column_names = [desc[0] for desc in result.cursor.description]
             
-            # Cria uma lista de dicionários, limpando cada valor individualmente
+           
             data = [
                 {column_names[i]: clean_value(value) for i, value in enumerate(row)}
                 for row in result.fetchall()
             ]
 
-        # Retorna os dados limpos como uma resposta JSON padrão do FastAPI
+       
         return data
         
     except Exception as e:
