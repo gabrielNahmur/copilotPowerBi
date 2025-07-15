@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import openai
 from sqlalchemy import create_engine, text
+import numpy as np 
 
 app = FastAPI()
 
@@ -16,6 +17,10 @@ else:
     engine = create_engine(db_connection_str)
 
 def carregar_schema():
+    """
+    Carrega o schema do banco de dados a partir de uma variável de ambiente (para produção no Render)
+    ou de um arquivo local (para desenvolvimento no seu computador).
+    """
     schema = os.getenv("DB_SCHEMA_DEFINITION")
     if schema:
         return schema
@@ -38,7 +43,6 @@ def ask_my_data(request: QuestionRequest):
     if engine is None or "ERRO" in schema_definition:
         return {"error": "Erro de configuração do servidor."}
 
-    # --- PROMPT FINAL COM REGRA DE ASPAS DUPLAS ---
     prompt = f"""
     Sua tarefa é traduzir a pergunta de um usuário em uma consulta SQL válida para o PostgreSQL.
 
@@ -74,7 +78,11 @@ def ask_my_data(request: QuestionRequest):
     try:
         with engine.connect() as connection:
             result_df = pd.read_sql_query(sql=text(generated_sql), con=connection)
+        
+        result_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        
         return result_df.to_dict(orient="records")
+        
     except Exception as e:
         return {"error": f"Erro ao executar a consulta no banco de dados: {e}\n[SQL Gerado que falhou: {generated_sql}]"}
 
